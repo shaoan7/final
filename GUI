@@ -1,0 +1,214 @@
+from PyQt5 import QtWidgets, QtGui, QtCore
+import sys
+import serial
+import time
+import matplotlib.pyplot as plt
+
+# --- 初始化全域串口，只開一次 ---
+try:
+    ser = serial.Serial('COM10', 9600, timeout=1)
+    time.sleep(2)
+except Exception as e:
+    print("❌ 串口打開失敗：", e)
+    ser = None
+
+# --- 資料記錄用 ---
+distance_data = []
+output_data = []
+recording = False
+start_time = 0
+
+# --- 讀取距離與 PID 輸出 ---
+def read_distance():
+    global distance_data, output_data, recording, start_time
+
+    if not ser:
+        return None
+
+    try:
+        line = ser.readline().decode(errors='ignore').strip()
+
+        if line == "#DONE":
+            print("✅ Reached target distance. PID stopped.")
+            if recording:
+                recording = False
+                plot_distance_output_chart()
+            return None
+
+        if line.startswith("D,"):
+            parts = line.split(",")
+            distance = int(parts[1])
+            #print(">>> 距離：", distance)
+
+            if recording:
+                timestamp = time.time() - start_time
+                distance_data.append((timestamp, distance))
+                if len(parts) >= 4 and parts[2] == "O":
+                    output = int(parts[3])
+                    output_data.append((timestamp, output))
+
+            return distance
+    except Exception as e:
+        print("❌ 解析錯誤：", e)
+    return None
+
+
+# --- 畫圖：PID 控制距離與輸出 ---
+def plot_distance_output_chart():
+    if not distance_data:
+        print("⚠ 無資料")
+        return
+
+    plt.figure(figsize=(10, 5))
+
+    times_d, dists = zip(*distance_data)
+    plt.subplot(2, 1, 1)
+    plt.plot(times_d, dists, label="Distance (cm)", marker='o')
+    plt.ylabel("Distance (cm)")
+    plt.grid()
+    plt.legend()
+
+    if output_data:
+        times_o, outs = zip(*output_data)
+        plt.subplot(2, 1, 2)
+        plt.plot(times_o, outs, label="PID Output", color='orange', marker='x')
+        plt.ylabel("PID Output")
+        plt.xlabel("Time (s)")
+        plt.grid()
+        plt.legend()
+
+    plt.suptitle("PID Control Record")
+
+    plt.tight_layout()
+    plt.show()
+
+##############################################################
+Prog = QtWidgets.QApplication(sys.argv)
+Main = QtWidgets.QWidget()
+Main.setWindowTitle('跟隨車')
+Main.resize(400, 400)
+Main.setStyleSheet('background:#FFF;')
+
+B_top = QtWidgets.QLabel(Main)
+B_top.setGeometry(0, 0, 400, 150)
+B_top.setStyleSheet('background:#CCC;')
+
+L1 = QtWidgets.QLabel(Main)
+L1.setText('輸入目標距離(cm)')
+L1.setGeometry((Main.width() - 225) // 2, 20, 250, 40)
+L1.setAlignment(QtCore.Qt.AlignCenter)
+L1.setStyleSheet('font-size:30px; color:#000; background:#CCC;')
+
+L2e = QtWidgets.QLabel(Main)
+L2e.setText('請輸入數字 0 ~ 99')
+L2e.setGeometry(140, 120, 250, 20)
+L2e.setStyleSheet('font-size:15px; color:#000; background:#CCC;')
+
+inp2 = QtWidgets.QLineEdit(Main)
+inp2.setGeometry(120, 80, 160, 40)
+inp2.setStyleSheet('''QLineEdit{font-size:25px; color:#000; border:1px solid #000; border-radius:5px;}
+QLineEdit:hover{border:3px solid #000;}
+QLineEdit:focus{border:3px solid #000; background:#EEE;}''')
+
+box = QtWidgets.QComboBox(Main)
+box.setGeometry(250, 170, 120, 50)
+box.addItems(['開關鍵', '按鍵'])
+box.setStyleSheet('font-size:30px; color:#000; border:3px solid #000; background:#EEE;')
+
+# --- 七段顯示器顯示區 ---
+img_map = {i: QtGui.QImage(f'7seg{i}.jpg') for i in range(10)}
+digit_labels = []
+img_width = 90
+img_height = 150
+x_start = 120
+
+for i in range(3):
+    label = QtWidgets.QLabel(Main)
+    label.setGeometry(x_start + i * img_width, 250, img_width, img_height)
+    label.show()
+    digit_labels.append(label)
+
+# --- 顯示數字圖像 ---
+def Display(num):
+    num = min(max(0, num), 999)
+    num_str = str(num).zfill(3)
+    digits = [int(ch) for ch in num_str]
+
+    for i in range(3):
+        digit_img = img_map[digits[i]].scaled(img_width, img_height)
+        digit_labels[i].setPixmap(QtGui.QPixmap.fromImage(digit_img))
+
+# --- 發送距離輸入值 ---
+def Add():
+    input_text = inp2.text()
+    if not input_text.isnumeric():
+        L2e.setText('請輸入數字 10 ~ 30')
+        L2e.setStyleSheet('font-size:15px; color:#F00; background:#CCC;')
+        return
+
+    distance = int(input_text)
+    if distance > 99:
+        L2e.setText('輸入數字不可大於 99')
+        L2e.setStyleSheet('font-size:15px; color:#F00; background:#CCC;')
+        return
+
+    L2e.setText('')
+    if ser:
+        ser.write(f"{distance}\n".encode())
+
+# --- 控制啟動 / 停止按鈕邏輯 ---
+def btn_press():
+    global btn_state, recording, distance_data, output_data, start_time
+    if btn_state == 0:
+        btn_state = 1
+        btn.setIcon(QtGui.QIcon('Button_on.jpg'))
+        if ser:
+            ser.write(b"#START\n")
+        recording = True
+        distance_data = []
+        output_data = []
+        start_time = time.time()
+    else:
+        btn_state = 0
+        btn.setIcon(QtGui.QIcon('Button_off.jpg'))
+        if ser:
+            ser.write(b"#STOP\n")
+        recording = False
+        plot_distance_output_chart()
+
+def btn_switch():
+    global btn
+    btn = QtWidgets.QPushButton(Main)
+    btn_index = box.currentIndex()
+    if btn_index == 0:
+        global btn_state
+        btn.setStyleSheet('border:0px;')
+        btn.setIcon(QtGui.QIcon('Button_off.jpg'))
+        btn.setIconSize(QtCore.QSize(200, 200))
+        btn.setGeometry(20, 160, 160, 70)
+        btn_state = 0
+        btn.clicked.connect(btn_press)
+    else:
+        btn.setStyleSheet('''QPushButton{font-size:40px; color:#000; border:1px solid #000; border-radius:5px; background:#EEE;}
+        QPushButton:pressed{border:3px solid #000; background:#DDD;}''')
+        btn.setText('發送')
+        btn.setGeometry(20, 160, 160, 70)
+        btn.clicked.connect(Add)
+    btn.show()
+
+box.currentIndexChanged.connect(btn_switch)
+btn_switch()
+
+# --- 週期性更新顯示器距離 ---
+def auto_update():
+    dist = read_distance()
+    if dist is not None:
+        Display(dist)
+
+timer = QtCore.QTimer()
+timer.timeout.connect(auto_update)
+timer.start(100)
+
+Display(0)
+Main.show()
+sys.exit(Prog.exec_())
