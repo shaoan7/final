@@ -1,0 +1,129 @@
+/* =========================================================
+ *  FollowCar.ino  ── 超音波 + PID + 直流馬達 (L298N)
+ *  ---------------------------------------------------------
+ *  ─ 只量一次距離 → 給 PID → 同筆資料立刻送 GUI
+ *  ─ 序列傳輸格式：  D,<distance_cm>
+ *  =======================================================*/
+const byte TrigPin = 13;
+const byte EchoPin = 12;
+const byte ENA     = 5;
+const byte IN1     = 7;
+const byte IN2     = 6;
+
+/* ---------- PID 參數 ---------- */
+float Kp = 12.0, Ki = 0.3, Kd = 5.0;
+float error = 0, prevError = 0, integral = 0;
+
+/* ---------- 目標與狀態 ---------- */
+float targetDistance = 20.0;      // cm
+bool  isRunning       = false;    // 由 GUI 控制
+bool  hasReachedTarget = false;
+const float DIST_TOL   = 1.0;
+const uint8_t STABLE_HIT = 5;
+int   stableCnt = 0;
+
+/* ---------- PWM 及取樣 ---------- */
+const int  PWM_MIN = 30, PWM_MAX = 150, PWM_SLEW = 10;
+int   lastPwm = 0;
+const unsigned long SAMPLE_MS = 100;
+unsigned long lastLoopMs = 0;
+
+/* ---------- 超音波移動平均 ---------- */
+const uint8_t N = 5;
+float buf[N] = {0};
+uint8_t idx  = 0;
+
+/* ---------- 函式宣告 ---------- */
+float getDistance();
+void  sendDistance(float d);
+void  moveForward(int pwm);
+void  moveBackward(int pwm);
+void  stopMotor();
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(TrigPin, OUTPUT);
+  pinMode(EchoPin, INPUT);
+  pinMode(ENA, OUTPUT); pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  delay(1000);
+}
+
+void loop() {
+  /* ===== 讀 GUI 指令 ===== */
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n'); cmd.trim();
+    if (cmd.startsWith("#START"))           { isRunning = true;  hasReachedTarget = false; stableCnt = 0; }
+    else if (cmd.startsWith("#STOP"))       { isRunning = false; stopMotor(); }
+    else if (cmd.toInt() > 0)               { targetDistance = cmd.toInt(); }
+  }
+
+  /* ===== 每 SAMPLE_MS 執行一次主流程 ===== */
+  if (millis() - lastLoopMs < SAMPLE_MS) return;
+  lastLoopMs = millis();
+
+  /* ===== 未啟動或已達標：只回傳距離 ===== */
+  if (!isRunning || hasReachedTarget) {
+    float d = getDistance();          // 量一次再送
+    sendDistance(d);
+    if (!isRunning) stopMotor();
+    return;
+  }
+
+  /* ===== 量測距離 (放入移動平均) ===== */
+  float raw = getDistance();
+  if (raw < 0 || raw > 500) return;   // 非法值直接忽略
+
+  buf[idx] = raw; idx = (idx + 1) % N;
+  float dist = 0;
+  for (uint8_t i = 0; i < N; i++) dist += buf[i];
+  dist /= N;
+
+  /* ===== PID ===== */
+  float dt = SAMPLE_MS / 1000.0;
+  error      = targetDistance - dist;
+  integral  += error * dt;
+  float der  = (error - prevError) / dt;
+  float out  = Kp * error + Ki * integral + Kd * der;
+  prevError  = error;
+
+  /* ----- 判定穩定達標 ----- */
+  if (abs(error) <= DIST_TOL) {
+    if (++stableCnt >= STABLE_HIT) { stopMotor(); hasReachedTarget = true; }
+  } else stableCnt = 0;
+
+  /* ----- PWM ----- */
+  int pwm = constrain(abs(out), PWM_MIN, PWM_MAX);
+  pwm = constrain(pwm, lastPwm - PWM_SLEW, lastPwm + PWM_SLEW);
+  lastPwm = pwm;
+
+  if (abs(out) < 5) stopMotor();
+  else if (out > 0) moveBackward(pwm);   // 距離太遠 → 後退
+  else              moveForward(pwm);    // 距離太近 → 前進
+
+  /* ===== 回傳距離 ===== */
+  sendDistance(dist);
+}
+
+/* ---------------- 超音波 ---------------- */
+float getDistance() {
+  digitalWrite(TrigPin, LOW);  delayMicroseconds(2);
+  digitalWrite(TrigPin, HIGH); delayMicroseconds(10);
+  digitalWrite(TrigPin, LOW);
+
+  long dur = pulseIn(EchoPin, HIGH, 40000);   // 40 ms
+  if (dur == 0) return -1;
+  float cm = dur * 0.034 / 2.0;
+  return (cm < 2 || cm > 400) ? -1 : cm;
+}
+
+/* ---------------- UART 封包 ---------------- */
+void sendDistance(float d) {
+  if (d < 0) return;               // 不送錯誤值
+  Serial.print(F("D,"));           // 標頭
+  Serial.println((int)d);          // 整數傳送
+}
+
+/* ---------------- 馬達 ---------------- */
+void moveForward(int pwm){ digitalWrite(IN1,HIGH); digitalWrite(IN2,LOW);  analogWrite(ENA,pwm); }
+void moveBackward(int pwm){digitalWrite(IN1,LOW);  digitalWrite(IN2,HIGH); analogWrite(ENA,pwm); }
+void stopMotor(){ analogWrite(ENA,0); digitalWrite(IN1,LOW); digitalWrite(IN2,LOW); }
