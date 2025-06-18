@@ -174,7 +174,7 @@ def btn_press():
         if ser:
             ser.write(b"#STOP\n")
         recording = False
-        plot_distance_output_chart()
+        #plot_distance_output_chart()
 
 def btn_switch():
     global btn
